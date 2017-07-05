@@ -18,14 +18,16 @@
 #include <iostream>
 #include <iomanip>
 
+typedef glm::vec3 Color;
+
 #ifdef DOUBLE_PRECISION
 	typedef glm::float64 Float;
 	typedef glm::dvec2 Vector2;
 	typedef glm::dvec3 Vector3;
+	typedef glm::dvec4 Vector4;
 #else
 	typedef glm::float32 Float;
 	typedef glm::vec2 Vector2;
 	typedef glm::vec3 Vector3;
+	typedef glm::vec4 Vector4;
 #endif
-
-	typedef glm::vec3 Color;
