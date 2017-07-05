@@ -2,8 +2,35 @@
 /// For now, this is going to look very shader-like; in the future I'll build something more extendable
 #include "common.h"
 
+inline
+Vector2 RandomVector2(pcg32& random)
+{
+	return Vector2(random.nextDouble(), random.nextDouble());
+}
+
+inline
+Vector3 RandomVector3(pcg32& random)
+{
+	return Vector3(random.nextDouble(), random.nextDouble(), random.nextDouble());
+}
+
+inline
+Vector3 SampleSphere(pcg32& random, Float radius)
+{
+	Float z = 1.0 - random.nextDouble() * 2.0;
+	Float phi = 2.0 * glm::pi<float>() * random.nextDouble();
+	
+	Float r = glm::sqrt(glm::max(0.0, 1.0 - (z * z)));
+
+	Float x = glm::cos(phi) * r;
+	Float y = glm::sin(phi) * r;
+
+	return Vector3(x, y, z) * radius * (Float)random.nextDouble();
+}
+
 Float EstimateDistance(const Vector3& pos)
 {
+	Vector3 J = Vector3(.75);
 	Vector3 w = pos;
 	Float m = glm::dot(w, w);
 	Float dz = 1.0;
@@ -27,7 +54,7 @@ Float EstimateDistance(const Vector3& pos)
 		k.z = w4.x + w4.y + w4.z - 6.0*w2.y*w2.z - 6.0*w2.x*w2.y + 2.0*w2.z*w2.x;
 		k.w = w2.x - w2.y + w2.z;
 
-		w = pos;
+		w = pos + J;
 		w.x += 64.0*w1.x*w1.y*w1.z*(w2.x - w2.z)*k.w*(w4.x - 6.0*w2.x*w2.z + w4.z)*k.z*k.y;
 		w.y += -16.0*w2.y*k.x*k.w*k.w + k.z*k.z;
 		w.z += -8.0*w1.y*k.w*(w4.x*w4.x - 28.0*w4.x*w2.x*w2.z + 70.0*w4.x*w4.z - 28.0*w2.x*w2.z*w4.z + w4.z*w4.z)*k.z*k.y;
@@ -41,39 +68,95 @@ Float EstimateDistance(const Vector3& pos)
 	return 0.25 * glm::log(m) * glm::sqrt(m) / dz;
 }
 
-Color Raymarch(const Vector2& uv, pcg32& random)
+// IQ's method
+Vector3 palette(Float t, Vector3 a, Vector3 b, Vector3 c, Vector3 d)
 {
-	Float zoom = 2.0;
+	return glm::clamp(a + b * glm::cos((c * t + d) * (Float)6.28318), Vector3(0.0), Vector3(1.0));
+}
 
-	// Ortho projection for now
-	Vector3 rayOrigin = Vector3((uv.x + 1.0) / zoom, uv.y / zoom, -3.0);
-	Vector3 rayDirection = Vector3(0.0, 0.0, 1.0);
+Vector3 debugIterations(Float factor)
+{
+	Vector3 a = Vector3(0.478, 0.500, 0.500);
+	Vector3 b = Vector3(0.5, .5, .5);
+	Vector3 c = Vector3(0.688, 0.748, 0.748);
+	Vector3 d = Vector3(0.318, 0.588, 0.908);
 
-	int steps = 0;
-	int maxIterations = 50;
-
-	Float distance = 0.0;
-	Float totalDistance = 0.0;
-	Float eps = .001;
-
-	for (steps = 0; steps < maxIterations; steps++)
-	{
-		distance = EstimateDistance(rayOrigin + rayDirection * totalDistance);
-
-		if (distance < eps)
-			break;
-
-		totalDistance += distance;
-	}
-
-	Float r = glm::clamp(steps / (Float)maxIterations, (Float)0.0, (Float)1.0);
-	return Color(r);
+	return palette(factor, a, b, c, d);
 }
 
 inline
-Vector2 RandomVector2(pcg32& random)
+Float saturate(Float t)
 {
-	return Vector2(random.nextDouble(), random.nextDouble());
+	return glm::clamp(t, (Float) 0.0, (Float) 1.0);
+}
+
+Color Raymarch(const Vector2& uv, pcg32& random)
+{
+	Float zoom = 6.0;
+
+	// Ortho projection for now
+	Vector3 rayOrigin = Vector3(glm::abs(uv.x) / zoom, uv.y / zoom, 0.0);
+	Vector3 rayDirection = Vector3(0.0, 0.0, 1.0);
+
+	rayOrigin.y += .275;
+
+	int steps = 0;
+	int maxIterations = 75;
+
+	Float distance = 0.0;
+	Float totalDistance = 0.0;
+	Float totalError = 0.0;
+	Float eps = .001;
+	Float maxDistance = 2.0;
+
+	int samples = 512;
+	Vector3 pos = rayOrigin + rayDirection * totalDistance;
+
+	bool estimate = uv.x > 0.0;
+	
+	// Standard sphere tracing
+	for (steps = 0; steps < maxIterations; steps++)
+	{
+		distance = EstimateDistance(pos);
+
+		if (distance < eps || totalDistance > maxDistance)
+			break;
+		
+		if (estimate)
+		{
+			// We look for points inside a sphere
+			for (int s = 0; s < samples; s++)
+			{
+				// Note: distance - eps IS CRITICAL: this way we make sure we're inside
+				// the sphere, where there shouldn't be any collision ;)
+				Vector3 offset = pos + SampleSphere(random, distance - eps);
+				Float d = EstimateDistance(offset);
+
+				// If one point is inside the surface, we can calculate the actual distance
+				// compared to our original estimation
+				if (d < eps)
+				{
+					Float actualDistance = glm::distance(offset, pos) + d;
+					totalError += glm::abs(distance - actualDistance) / distance;
+				}
+			}
+		}
+
+		totalDistance += distance;
+		pos = rayOrigin + rayDirection * totalDistance;
+	}
+
+	// This normalization factor focuses on less iterated steps, such as the overstepped center of bulbs
+	totalError /= (1.0 - steps / (Float)maxIterations);
+
+	Color outColor;
+
+	if (estimate)
+		outColor = debugIterations(saturate(totalError));
+	else
+		outColor = Color(steps / (Float)maxIterations);
+
+	return outColor;
 }
 
 void RenderBucket(int threadNumber, int bucketHeight, int width, int height, Color * pixels)
@@ -84,7 +167,7 @@ void RenderBucket(int threadNumber, int bucketHeight, int width, int height, Col
 	pcg32 random;
 	random.seed(14041956 * threadNumber);
 
-	int aa = 1;
+	int aa = 2;
 	Float aaFactor = 1.0 / aa;
 	Vector2 pixelSize = Vector2(1.0 / (Float)width, 1.0 / (Float)height);
 
@@ -138,20 +221,20 @@ void Render(sf::Image & result)
 	}
 
 	double delta = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - clock).count() / 1000.0;
-	std::cout << "Render time: " << std::fixed << std::setprecision(3) << delta  << "ms" << std::endl;
+	std::cout << "Render time: " << std::fixed << std::setprecision(4) << delta  << "s" << std::endl;
 }
 
 void main()
 {
-	int width = 1024;
-	int height = 1024;
+	int width = 512;
+	int height = 512;
 	sf::RenderWindow window(sf::VideoMode(width, height), "DE Error Estimation Tool");
 
 	sf::Image result;
 	result.create(width, height, sf::Color::Black);
 	Render(result);
 
-	result.saveToFile("output/output.png");
+	result.saveToFile("output.png");
 
 	sf::Texture tx;
 	tx.loadFromImage(result);
